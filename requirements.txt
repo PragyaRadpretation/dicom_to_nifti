@@ -1,0 +1,4 @@
+pandas==3.0.6
+pydicom==3.0.2
+Requests==2.34.2
+simpleitk==2.5.6
