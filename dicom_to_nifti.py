@@ -12,10 +12,16 @@ ORTHANC_URL = "https://pacs-ayurveda.radpretation.ai"
 ORTHANC_USER = None
 ORTHANC_PASSWORD = None
 
-EXCEL_FILE = r"dicom_to_nifti.py"
+EXCEL_FILE = r"mapped_radiology_reports_csv_final.xlsx"
 SHEET_NAME = 0
 STUDY_ID_COL = "studyID"
 OUTPUT_DIR = "Nifti_folder"
+
+# TRACKING BEHAVIOR
+# Set DELETE_ROW_ON_SUCCESS = True if you want to permanently remove rows from Excel.
+# If False, it adds a status column to track progress without losing other columns/reports.
+DELETE_ROW_ON_SUCCESS = False
+STATUS_COL = "Processing_Status"
 # --------------------------------------------------
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -24,12 +30,10 @@ auth = (ORTHANC_USER, ORTHANC_PASSWORD) if ORTHANC_USER and ORTHANC_PASSWORD els
 
 def resolve_orthanc_study_id(study_id: str) -> str:
     """Checks whether study_id is an internal Orthanc ID or a DICOM StudyInstanceUID."""
-    # 1. Test direct Orthanc internal ID
     check_resp = requests.get(f"{ORTHANC_URL}/studies/{study_id}", auth=auth)
     if check_resp.status_code == 200:
         return study_id
 
-    # 2. Query via StudyInstanceUID lookup
     payload = {
         "Level": "Study",
         "Query": {"StudyInstanceUID": study_id}
@@ -66,17 +70,14 @@ def convert_study_to_nifti(dicom_root_dir: str, output_path: str):
     """
     series_map = {}
 
-    # 1. Walk through all extracted files and group valid DICOM image files
     for root, _, files in os.walk(dicom_root_dir):
         for f in files:
             file_path = os.path.join(root, f)
             try:
-                # Read header only (fast)
                 dcm = pydicom.dcmread(file_path, stop_before_pixels=True, force=True)
                 if not hasattr(dcm, "SeriesInstanceUID"):
                     continue
 
-                # Exclude non-image modalities (Structured Reports, Presentation States, etc.)
                 modality = getattr(dcm, "Modality", "")
                 if modality in ["SR", "PR", "KO", "DOC"]:
                     continue
@@ -87,21 +88,17 @@ def convert_study_to_nifti(dicom_root_dir: str, output_path: str):
                 continue
 
     if not series_map:
-        raise RuntimeError("No readable DICOM image files found in the downloaded archive.")
+        raise RuntimeError("No readable DICOM image files found in archive.")
 
-    # 2. Pick the series with the largest number of slices (the main volume)
+    # Pick the series with the largest number of slices
     best_series_uid = max(series_map, key=lambda k: len(series_map[k]))
     selected_files = series_map[best_series_uid]
 
     reader = sitk.ImageSeriesReader()
 
-    # 3. If multi-slice volume (3D), sort slices spatially; otherwise load single slice (2D)
     if len(selected_files) > 1:
-        # Find directory where files reside to let SimpleITK sort correctly
         series_dir = os.path.dirname(selected_files[0])
         sorted_filenames = reader.GetGDCMSeriesFileNames(series_dir, best_series_uid)
-        
-        # If files were spread across subfolders, fall back to the collected file list
         if not sorted_filenames:
             sorted_filenames = selected_files
 
@@ -110,8 +107,12 @@ def convert_study_to_nifti(dicom_root_dir: str, output_path: str):
     else:
         image = sitk.ReadImage(selected_files[0])
 
-    # 4. Save to final .nii.gz file
     sitk.WriteImage(image, output_path)
+
+
+def save_excel_state(df: pd.DataFrame):
+    """Saves the updated DataFrame back to the Excel file safely."""
+    df.to_excel(EXCEL_FILE, sheet_name="Sheet1" if SHEET_NAME == 0 else str(SHEET_NAME), index=False, engine="openpyxl")
 
 
 def process_all_studies():
@@ -122,30 +123,64 @@ def process_all_studies():
         engine="openpyxl"
     )
 
-    study_ids = df[STUDY_ID_COL].dropna().astype(str).tolist()
+    if STATUS_COL not in df.columns and not DELETE_ROW_ON_SUCCESS:
+        df[STATUS_COL] = ""
 
-    for idx, raw_id in enumerate(study_ids, 1):
-        clean_id = raw_id.strip()
-        final_nifti_path = os.path.join(OUTPUT_DIR, f"{clean_id}.nii.gz")
+    total_initial = len(df)
 
-        print(f"[{idx}/{len(study_ids)}] Processing: {clean_id}...")
-
-        if os.path.exists(final_nifti_path):
-            print(f"  -> File {final_nifti_path} already exists. Skipping.")
+    # Iterate over a copy of rows so index shifts don't cause skip bugs
+    for idx in df.index.tolist():
+        # Check if row still exists (in case of dynamic deletions)
+        if idx not in df.index:
             continue
+
+        raw_id = df.loc[idx, STUDY_ID_COL]
+        if pd.isna(raw_id):
+            continue
+
+        clean_id = str(raw_id).strip()
+
+        # Skip if already marked DONE (Status Column mode)
+        if not DELETE_ROW_ON_SUCCESS:
+            if df.loc[idx, STATUS_COL] == "DONE":
+                print(f"Skipping {clean_id} (already marked DONE in Excel).")
+                continue
+
+        print(f"Processing: {clean_id}...")
+        final_nifti_path = os.path.join(OUTPUT_DIR, f"{clean_id}.nii.gz")
 
         orthanc_id = resolve_orthanc_study_id(clean_id)
         if not orthanc_id:
-            print(f"  -> Study '{clean_id}' not found on Orthanc. Skipping.")
+            print(f"  -> Study '{clean_id}' not found on Orthanc.")
+            if not DELETE_ROW_ON_SUCCESS:
+                df.loc[idx, STATUS_COL] = "NOT_FOUND_ON_ORTHANC"
+                save_excel_state(df)
             continue
 
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
+                # 1. Download DICOMs
                 download_study_dicom(orthanc_id, temp_dir)
+
+                # 2. Convert to NIfTI
                 convert_study_to_nifti(temp_dir, final_nifti_path)
-                print(f"  -> Successfully saved: {final_nifti_path}")
+                print(f"  -> Converted & saved: {final_nifti_path}")
+
+                # 3. Update Excel tracking
+                if DELETE_ROW_ON_SUCCESS:
+                    df.drop(index=idx, inplace=True)
+                    save_excel_state(df)
+                    print(f"  -> Deleted row for {clean_id} from Excel.")
+                else:
+                    df.loc[idx, STATUS_COL] = "DONE"
+                    save_excel_state(df)
+                    print(f"  -> Marked {clean_id} as DONE in Excel.")
+
             except Exception as e:
                 print(f"  -> Failed to convert {clean_id}: {e}")
+                if not DELETE_ROW_ON_SUCCESS:
+                    df.loc[idx, STATUS_COL] = f"FAILED: {str(e)[:40]}"
+                    save_excel_state(df)
 
 
 if __name__ == "__main__":
