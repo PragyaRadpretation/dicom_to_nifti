@@ -12,7 +12,7 @@ ORTHANC_URL = "https://pacs-ayurveda.radpretation.ai"
 ORTHANC_USER = None
 ORTHANC_PASSWORD = None
 
-EXCEL_FILE = r"mapped_radiology_reports_csv_final.xlsx"
+EXCEL_FILE = r"mapped_radiology_reports_csv_finall.xlsx"
 SHEET_NAME = 0
 STUDY_ID_COL = "studyID"
 OUTPUT_DIR = "Nifti_folder"
@@ -20,7 +20,7 @@ OUTPUT_DIR = "Nifti_folder"
 # TRACKING BEHAVIOR
 # Set DELETE_ROW_ON_SUCCESS = True if you want to permanently remove rows from Excel.
 # If False, it adds a status column to track progress without losing other columns/reports.
-DELETE_ROW_ON_SUCCESS = False
+DELETE_ROW_ON_SUCCESS = True
 STATUS_COL = "Processing_Status"
 # --------------------------------------------------
 
@@ -146,8 +146,21 @@ def process_all_studies():
                 print(f"Skipping {clean_id} (already marked DONE in Excel).")
                 continue
 
-        print(f"Processing: {clean_id}...")
         final_nifti_path = os.path.join(OUTPUT_DIR, f"{clean_id}.nii.gz")
+        
+        # Check if the file already exists in the folder
+        if os.path.exists(final_nifti_path):
+            if DELETE_ROW_ON_SUCCESS:
+                print(f"File already exists for {clean_id}. Deleting this row from Excel...")
+                df.drop(index=idx, inplace=True)
+                save_excel_state(df)
+            else:
+                print(f"File already exists for {clean_id}. Skipping...")
+            
+            # 'continue' tells the script to jump to the next row and process the remaining ones
+            continue
+
+        print(f"Processing new study: {clean_id}...")
 
         orthanc_id = resolve_orthanc_study_id(clean_id)
         if not orthanc_id:
