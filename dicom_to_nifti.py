@@ -12,7 +12,7 @@ ORTHANC_URL = "https://pacs-ayurveda.radpretation.ai"
 ORTHANC_USER = None
 ORTHANC_PASSWORD = None
 
-EXCEL_FILE = r"mapped_radiology_reports_csv_updated.xlsx"
+EXCEL_FILE = r"remaining_studies.xlsx"
 SHEET_NAME = 0
 STUDY_ID_COL = "studyID"
 OUTPUT_DIR = "Nifti_folder"
@@ -148,7 +148,9 @@ def process_all_studies():
 
         print(f"Processing: {clean_id}...")
         final_nifti_path = os.path.join(OUTPUT_DIR, f"{clean_id}.nii.gz")
-
+        if os.path.exists(final_nifti_path):
+            print(f"Skipping {clean_id}: NIfTI already exists.")
+            continue
         orthanc_id = resolve_orthanc_study_id(clean_id)
         if not orthanc_id:
             print(f"  -> Study '{clean_id}' not found on Orthanc.")
